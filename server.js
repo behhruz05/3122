@@ -18,8 +18,28 @@ const PORT = process.env.PORT || 4322;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 
+// Majburiy env o'zgaruvchilarni tekshirish
+const missingEnv = ['MONGO_URI', 'JWT_SECRET'].filter(
+  (key) => !process.env[key]
+);
+
+if (missingEnv.length) {
+  console.log(`❌ .env da yo'q: ${missingEnv.join(', ')}`);
+}
+
 app.use(cors());
 app.use(express.json());
+
+// Noto'g'ri JSON yuborilsa 500 emas, 400 qaytarish
+app.use((error, req, res, next) => {
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      message: 'JSON formati noto‘g‘ri.',
+    });
+  }
+
+  next(error);
+});
 
 
 // =============================
@@ -27,7 +47,9 @@ app.use(express.json());
 // =============================
 
 mongoose
-  .connect(process.env.MONGO_URI)
+  .connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 10000,
+  })
   .then(() => {
     console.log('✅ MongoDB ulandi');
   })
@@ -140,6 +162,21 @@ const userSchema = new mongoose.Schema(
 );
 
 const User = mongoose.model('User', userSchema);
+
+
+// =============================
+// DB ULANISHINI TEKSHIRISH
+// =============================
+
+function requireDb(req, res, next) {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({
+      message: 'Database bilan ulanish yo‘q. Keyinroq urinib ko‘ring.',
+    });
+  }
+
+  next();
+}
 
 
 // =============================
@@ -266,7 +303,23 @@ const swaggerSpec = swaggerJsdoc({
 
             gender: {
               type: 'string',
+              enum: ['male', 'female'],
               example: 'male',
+            },
+
+            dateOfBirth: {
+              type: 'string',
+              format: 'date',
+              example: '2005-01-15',
+            },
+
+            address: {
+              type: 'object',
+              properties: {
+                city: { type: 'string', example: 'Tashkent' },
+                district: { type: 'string', example: 'Chilonzor' },
+                country: { type: 'string', example: 'Uzbekistan' },
+              },
             },
           },
         },
@@ -319,6 +372,8 @@ app.use(
 app.get('/', (req, res) => {
   res.json({
     message: 'API ishlayapti',
+    database:
+      mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     endpoints: [
       'POST /register',
       'POST /login',
@@ -352,9 +407,11 @@ app.get('/', (req, res) => {
  *         description: Ma'lumotlar noto'g'ri
  *       409:
  *         description: Email yoki username mavjud
+ *       503:
+ *         description: Database ulanmagan
  */
 
-app.post('/register', async (req, res) => {
+app.post('/register', requireDb, async (req, res) => {
   try {
     const {
       email,
@@ -385,6 +442,35 @@ app.post('/register', async (req, res) => {
     }
 
 
+    if (
+      [email, password, firstName, lastName, username].some(
+        (value) => typeof value !== 'string'
+      )
+    ) {
+      return res.status(400).json({
+        message: 'Maydonlar matn (string) bo‘lishi kerak.',
+      });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({
+        message: 'Email formati noto‘g‘ri.',
+      });
+    }
+
+    if (gender && !['male', 'female'].includes(gender)) {
+      return res.status(400).json({
+        message: 'gender faqat "male" yoki "female" bo‘lishi mumkin.',
+      });
+    }
+
+    if (dateOfBirth && Number.isNaN(new Date(dateOfBirth).getTime())) {
+      return res.status(400).json({
+        message: 'dateOfBirth sanasi noto‘g‘ri (masalan: 2005-01-15).',
+      });
+    }
+
+
     // 2. Password tekshirish
     if (password.length < 6) {
       return res.status(400).json({
@@ -395,7 +481,7 @@ app.post('/register', async (req, res) => {
 
     // 3. Email mavjudligini tekshirish
     const existingEmail = await User.findOne({
-      email: email.toLowerCase(),
+      email: email.trim().toLowerCase(),
     });
 
     if (existingEmail) {
@@ -407,7 +493,7 @@ app.post('/register', async (req, res) => {
 
     // 4. Username mavjudligini tekshirish
     const existingUsername = await User.findOne({
-      username,
+      username: username.trim(),
     });
 
     if (existingUsername) {
@@ -426,7 +512,7 @@ app.post('/register', async (req, res) => {
 
     // 6. MongoDB ga user yaratish
     const user = await User.create({
-      email: email.toLowerCase(),
+      email: email.trim().toLowerCase(),
       passwordHash,
       firstName,
       lastName,
@@ -469,6 +555,19 @@ app.post('/register', async (req, res) => {
   } catch (error) {
     console.log(error);
 
+    // Bir vaqtda ikki so'rov kelsa unique index ushlaydi
+    if (error.code === 11000) {
+      return res.status(409).json({
+        message: 'Bu email yoki username allaqachon mavjud.',
+      });
+    }
+
+    if (error.name === 'ValidationError' || error.name === 'CastError') {
+      return res.status(400).json({
+        message: error.message,
+      });
+    }
+
     res.status(500).json({
       message: 'Server xatosi.',
     });
@@ -502,7 +601,7 @@ app.post('/register', async (req, res) => {
  *         description: Email yoki password xato
  */
 
-app.post('/login', async (req, res) => {
+app.post('/login', requireDb, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -515,7 +614,7 @@ app.post('/login', async (req, res) => {
 
 
     const user = await User.findOne({
-      email: email.toLowerCase(),
+      email: String(email).trim().toLowerCase(),
     });
 
 
@@ -527,7 +626,7 @@ app.post('/login', async (req, res) => {
 
 
     const passwordCorrect = await bcrypt.compare(
-      password,
+      String(password),
       user.passwordHash
     );
 
@@ -608,7 +707,7 @@ app.post('/login', async (req, res) => {
  *         description: User topilmadi
  */
 
-app.get('/me', requireAuth, async (req, res) => {
+app.get('/me', requireAuth, requireDb, async (req, res) => {
   try {
 
     const user = await User.findById(req.auth.sub);
