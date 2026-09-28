@@ -4,16 +4,21 @@ const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const cors = require('cors');
 
 const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
 
 const app = express();
 
+
+
+
 const PORT = process.env.PORT || 4322;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 
+app.use(cors());
 app.use(express.json());
 
 
@@ -194,13 +199,17 @@ const swaggerSpec = swaggerJsdoc({
 
     servers: [
       {
+        url: '/',
+        description: 'Joriy server',
+      },
+      {
+        url: 'https://three122.onrender.com',
+        description: 'Global server',
+      },
+      {
         url: `http://localhost:${PORT}`,
         description: 'Local server',
       },
-      {
-        url:'https://three122.onrender.com',
-        description:"Global server"
-      }
     ],
 
     components: {
